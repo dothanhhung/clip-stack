@@ -1,6 +1,28 @@
 #Requires AutoHotkey v2.0
-#SingleInstance Force
+#SingleInstance Off
 Persistent
+
+; ---- one instance; desktop icon / right-click menu pass /history or /typed to it ----
+global MSG_CMD := 0x5C57
+global StartCmd := A_Args.Length ? A_Args[1] : ""
+DetectHiddenWindows(true)
+for hw in WinGetList(A_ScriptFullPath " ahk_class AutoHotkey") {
+    if (hw = A_ScriptHwnd)
+        continue
+    if (StartCmd = "/history" || StartCmd = "/typed") {
+        try DllCall("AllowSetForegroundWindow", "UInt", WinGetPID(hw))
+        PostMessage(MSG_CMD, StartCmd = "/history" ? 1 : 2, 0, , hw)
+        ExitApp
+    }
+    WinClose(hw)                        ; plain start = replace the old copy (it saves on exit)
+    WinWaitClose(hw, , 3)
+}
+DetectHiddenWindows(false)
+OnMessage(MSG_CMD, RemoteCmd)
+RemoteCmd(wParam, *) {
+    SetTimer(wParam = 1 ? ShowHistory : ShowTyped, -1)
+    return 1
+}
 
 ; ============================================================
 ;  Clip Stack - keeps every Ctrl+C (text) + a short-term log of what you type
@@ -45,6 +67,10 @@ OnClipboardChange(ClipChanged)
 StartTypingRecorder()
 SetTimer(SaveTypedIfDirty, 3000)
 OnExit((*) => SaveTyped())
+if (StartCmd = "/history")
+    SetTimer(ShowHistory, -300)
+else if (StartCmd = "/typed")
+    SetTimer(ShowTyped, -300)
 
 ; ---------------- Ctrl+Shift+Z chord ----------------
 $^+z:: {
@@ -175,6 +201,7 @@ BuildGui() {
     Gui1.Add("Button", "x+10 ym-1", "Clear all").OnEvent("Click", ClearAll)
     LV := Gui1.Add("ListView", "xm w620 h360 -Multi Grid", ["#", "Text"])
     LV.OnEvent("DoubleClick", (*) => PickSelected())
+    LV.OnEvent("ContextMenu", ClipMenu)
     HintTxt := Gui1.Add("Text", "xm w620 cGray", "Enter / double-click = paste     Del = remove     Esc = close     Ctrl+Shift+Z+C = cycle")
     Gui1.Add("Button", "Default Hidden w0 h0", "OK").OnEvent("Click", (*) => PickSelected())
     Gui1.OnEvent("Escape", (*) => Gui1.Hide())
@@ -222,6 +249,12 @@ PickSelected() {
     Gui1.Hide()
     SetClip(txt)
     AddItem(txt)                        ; picked item moves to the top
+    cls := ""
+    try cls := WinGetClass(LastWin)
+    if (cls ~= "^(Progman|WorkerW|Shell_TrayWnd|Shell_SecondaryTrayWnd)$") || !cls {
+        Tip("Copied - paste it with Ctrl+V")    ; opened from the desktop: nowhere to paste
+        return
+    }
     if LastWin && WinExist(LastWin) {
         WinActivate(LastWin)
         if WinWaitActive(LastWin, , 1) {
@@ -248,6 +281,29 @@ ClearAll(*) {
     History := []
     SaveHistory()
     RefreshList()
+}
+
+; right-click on a row of the clipboard list
+ClipMenu(ctrl, item, isRightClick, x, y) {
+    if !item
+        return
+    LV.Modify(0, "-Select"), LV.Modify(item, "Select Focus")
+    m := Menu()
+    m.Add("Paste", (*) => PickSelected())
+    m.Add("Copy", ClipCopySel)
+    m.Add("Delete", (*) => RemoveSelected())
+    m.Add()
+    m.Add("Clear all", ClearAll)
+    m.Default := "Paste"
+    m.Show()
+}
+ClipCopySel(*) {
+    idx := SelectedIndex()
+    if !idx
+        return
+    SetClip(History[idx])
+    AddItem(History[idx])
+    Tip("Copied - paste it with Ctrl+V")
 }
 
 GuiActive() => IsObject(Gui1) && WinActive("ahk_id " Gui1.Hwnd)
@@ -397,6 +453,7 @@ BuildTypedGui() {
     TLV := Gui2.Add("ListView", "xm w880 h210 -Multi Grid", ["#", "Time", "App", "Words", "Start of text"])
     TLV.OnEvent("ItemSelect", (*) => ShowTypedSel())
     TLV.OnEvent("DoubleClick", TypedCopySel)
+    TLV.OnEvent("ContextMenu", TypedMenu)
     TEdit := Gui2.Add("Edit", "xm w880 h340 ReadOnly Multi VScroll WantReturn")
     Gui2.OnEvent("Escape", (*) => Gui2.Hide())
     Gui2.OnEvent("Close", (*) => Gui2.Hide())
@@ -455,6 +512,34 @@ TypedCopySel(*) {
         return
     SetClip(Typed[idx].text)
     Tip("Copied - paste it with Ctrl+V")
+}
+
+; right-click on a row of the typed-text list
+TypedMenu(ctrl, item, isRightClick, x, y) {
+    if !item
+        return
+    TLV.Modify(0, "-Select"), TLV.Modify(item, "Select Focus")
+    ShowTypedSel()
+    m := Menu()
+    m.Add("Copy this text", TypedCopySel)
+    m.Add("Copy all", TypedCopyAll)
+    m.Add("Delete this entry", TypedDeleteSel)
+    m.Add()
+    m.Add(TypedPaused ? "Resume recording" : "Pause recording", TogglePause)
+    m.Add("Clear all", TypedClear)
+    m.Default := "Copy this text"
+    m.Show()
+}
+
+TypedDeleteSel(*) {
+    global Typed, TypedChars
+    idx := TypedSelIndex()
+    if !idx || idx > Typed.Length
+        return
+    TypedChars -= StrLen(Typed[idx].text)
+    Typed.RemoveAt(idx)
+    SaveTyped()
+    RefreshTyped()
 }
 
 TypedCopyAll(*) {
